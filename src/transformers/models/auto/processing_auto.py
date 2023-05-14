@@ -22,8 +22,9 @@ from collections import OrderedDict
 from ...configuration_utils import PretrainedConfig
 from ...dynamic_module_utils import get_class_from_dynamic_module
 from ...feature_extraction_utils import FeatureExtractionMixin
+from ...image_processing_utils import ImageProcessingMixin
 from ...tokenization_utils import TOKENIZER_CONFIG_FILE
-from ...utils import CONFIG_NAME, FEATURE_EXTRACTOR_NAME, get_file_from_repo, logging
+from ...utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo, logging
 from .auto_factory import _LazyAutoMapping
 from .configuration_auto import (
     CONFIG_MAPPING_NAMES,
@@ -31,21 +32,52 @@ from .configuration_auto import (
     model_type_to_module_name,
     replace_list_option_in_docstrings,
 )
+from .feature_extraction_auto import AutoFeatureExtractor
+from .image_processing_auto import AutoImageProcessor
+from .tokenization_auto import AutoTokenizer
 
 
 logger = logging.get_logger(__name__)
 
 PROCESSOR_MAPPING_NAMES = OrderedDict(
     [
+        ("align", "AlignProcessor"),
+        ("altclip", "AltCLIPProcessor"),
+        ("blip", "BlipProcessor"),
+        ("blip-2", "Blip2Processor"),
+        ("bridgetower", "BridgeTowerProcessor"),
+        ("chinese_clip", "ChineseCLIPProcessor"),
+        ("clap", "ClapProcessor"),
         ("clip", "CLIPProcessor"),
+        ("clipseg", "CLIPSegProcessor"),
+        ("flava", "FlavaProcessor"),
+        ("git", "GitProcessor"),
+        ("groupvit", "CLIPProcessor"),
+        ("hubert", "Wav2Vec2Processor"),
         ("layoutlmv2", "LayoutLMv2Processor"),
-        ("layoutxlm", "LayoutXLMProcessor"),
+        ("layoutlmv3", "LayoutLMv3Processor"),
+        ("markuplm", "MarkupLMProcessor"),
+        ("mgp-str", "MgpstrProcessor"),
+        ("oneformer", "OneFormerProcessor"),
+        ("owlvit", "OwlViTProcessor"),
+        ("pix2struct", "Pix2StructProcessor"),
+        ("sam", "SamProcessor"),
+        ("sew", "Wav2Vec2Processor"),
+        ("sew-d", "Wav2Vec2Processor"),
         ("speech_to_text", "Speech2TextProcessor"),
         ("speech_to_text_2", "Speech2Text2Processor"),
+        ("speecht5", "SpeechT5Processor"),
         ("trocr", "TrOCRProcessor"),
-        ("wav2vec2", "Wav2Vec2Processor"),
-        ("wav2vec2_with_lm", "Wav2Vec2ProcessorWithLM"),
+        ("tvlt", "TvltProcessor"),
+        ("unispeech", "Wav2Vec2Processor"),
+        ("unispeech-sat", "Wav2Vec2Processor"),
+        ("vilt", "ViltProcessor"),
         ("vision-text-dual-encoder", "VisionTextDualEncoderProcessor"),
+        ("wav2vec2", "Wav2Vec2Processor"),
+        ("wav2vec2-conformer", "Wav2Vec2Processor"),
+        ("wavlm", "Wav2Vec2Processor"),
+        ("whisper", "WhisperProcessor"),
+        ("xclip", "XCLIPProcessor"),
     ]
 )
 
@@ -58,11 +90,20 @@ def processor_class_from_name(class_name: str):
             module_name = model_type_to_module_name(module_name)
 
             module = importlib.import_module(f".{module_name}", "transformers.models")
-            return getattr(module, class_name)
+            try:
+                return getattr(module, class_name)
+            except AttributeError:
+                continue
 
     for processor in PROCESSOR_MAPPING._extra_content.values():
         if getattr(processor, "__name__", None) == class_name:
             return processor
+
+    # We did not fine the class, but maybe it's because a dep is missing. In that case, the class will be in the main
+    # init and we return the proper dummy to get an appropriate error message.
+    main_module = importlib.import_module("transformers")
+    if hasattr(main_module, class_name):
+        return getattr(main_module, class_name)
 
     return None
 
@@ -115,7 +156,7 @@ class AutoProcessor:
                 'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
             use_auth_token (`str` or *bool*, *optional*):
                 The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-                when running `transformers-cli login` (stored in `~/.huggingface`).
+                when running `huggingface-cli login` (stored in `~/.huggingface`).
             revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
                 git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
@@ -149,7 +190,7 @@ class AutoProcessor:
         >>> processor = AutoProcessor.from_pretrained("facebook/wav2vec2-base-960h")
 
         >>> # If processor files are in a directory (e.g. processor was saved using *save_pretrained('./test/saved_model/')*)
-        >>> processor = AutoProcessor.from_pretrained("./test/saved_model/")
+        >>> # processor = AutoProcessor.from_pretrained("./test/saved_model/")
         ```"""
         config = kwargs.pop("config", None)
         trust_remote_code = kwargs.pop("trust_remote_code", False)
@@ -163,11 +204,18 @@ class AutoProcessor:
         get_file_from_repo_kwargs = {
             key: kwargs[key] for key in inspect.signature(get_file_from_repo).parameters.keys() if key in kwargs
         }
-        # Let's start by checking whether the processor class is saved in a feature extractor
+        # Let's start by checking whether the processor class is saved in an image processor
         preprocessor_config_file = get_file_from_repo(
             pretrained_model_name_or_path, FEATURE_EXTRACTOR_NAME, **get_file_from_repo_kwargs
         )
         if preprocessor_config_file is not None:
+            config_dict, _ = ImageProcessingMixin.get_image_processor_dict(pretrained_model_name_or_path, **kwargs)
+            processor_class = config_dict.get("processor_class", None)
+            if "AutoProcessor" in config_dict.get("auto_map", {}):
+                processor_auto_map = config_dict["auto_map"]["AutoProcessor"]
+
+        # If not found, let's check whether the processor class is saved in a feature extractor config
+        if preprocessor_config_file is not None and processor_class is None:
             config_dict, _ = FeatureExtractionMixin.get_feature_extractor_dict(pretrained_model_name_or_path, **kwargs)
             processor_class = config_dict.get("processor_class", None)
             if "AutoProcessor" in config_dict.get("auto_map", {}):
@@ -207,15 +255,9 @@ class AutoProcessor:
                         "in that repo on your local machine. Make sure you have read the code there to avoid "
                         "malicious use, then set the option `trust_remote_code=True` to remove this error."
                     )
-                if kwargs.get("revision", None) is None:
-                    logger.warning(
-                        "Explicitly passing a `revision` is encouraged when loading a feature extractor with custom "
-                        "code to ensure no malicious code has been contributed in a newer revision."
-                    )
 
-                module_file, class_name = processor_auto_map.split(".")
                 processor_class = get_class_from_dynamic_module(
-                    pretrained_model_name_or_path, module_file + ".py", class_name, **kwargs
+                    processor_auto_map, pretrained_model_name_or_path, **kwargs
                 )
             else:
                 processor_class = processor_class_from_name(processor_class)
@@ -228,10 +270,31 @@ class AutoProcessor:
         if type(config) in PROCESSOR_MAPPING:
             return PROCESSOR_MAPPING[type(config)].from_pretrained(pretrained_model_name_or_path, **kwargs)
 
+        # At this stage, there doesn't seem to be a `Processor` class available for this model, so let's try a
+        # tokenizer.
+        try:
+            return AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path, trust_remote_code=trust_remote_code, **kwargs
+            )
+        except Exception:
+            try:
+                return AutoImageProcessor.from_pretrained(
+                    pretrained_model_name_or_path, trust_remote_code=trust_remote_code, **kwargs
+                )
+            except Exception:
+                pass
+
+            try:
+                return AutoFeatureExtractor.from_pretrained(
+                    pretrained_model_name_or_path, trust_remote_code=trust_remote_code, **kwargs
+                )
+            except Exception:
+                pass
+
         raise ValueError(
-            f"Unrecognized processor in {pretrained_model_name_or_path}. Should have a `processor_type` key in "
-            f"its {FEATURE_EXTRACTOR_NAME}, or one of the following `model_type` keys in its {CONFIG_NAME}: "
-            f"{', '.join(c for c in PROCESSOR_MAPPING_NAMES.keys())}"
+            f"Unrecognized processing class in {pretrained_model_name_or_path}. Can't instantiate a processor, a "
+            "tokenizer, an image processor or a feature extractor for this model. Make sure the repository contains"
+            "the files of at least one of those processing classes."
         )
 
     @staticmethod

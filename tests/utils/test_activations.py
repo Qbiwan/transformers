@@ -46,19 +46,29 @@ class TestActivations(unittest.TestCase):
         self.assertTrue(torch.allclose(y_gelu * clipped_mask, y_gelu_10 * clipped_mask))
 
     def test_get_activation(self):
-        get_activation("swish")
-        get_activation("silu")
-        get_activation("relu")
-        get_activation("tanh")
-        get_activation("gelu_new")
-        get_activation("gelu_fast")
-        get_activation("gelu_python")
+        get_activation("gelu")
         get_activation("gelu_10")
-        get_activation("quick_gelu")
-        get_activation("mish")
+        get_activation("gelu_fast")
+        get_activation("gelu_new")
+        get_activation("gelu_python")
+        get_activation("gelu_pytorch_tanh")
         get_activation("linear")
+        get_activation("mish")
+        get_activation("quick_gelu")
+        get_activation("relu")
         get_activation("sigmoid")
+        get_activation("silu")
+        get_activation("swish")
+        get_activation("tanh")
         with self.assertRaises(KeyError):
             get_activation("bogus")
         with self.assertRaises(KeyError):
             get_activation(None)
+
+    def test_activations_are_distinct_objects(self):
+        act1 = get_activation("gelu")
+        act1.a = 1
+        act2 = get_activation("gelu")
+        self.assertEqual(act1.a, 1)
+        with self.assertRaises(AttributeError):
+            _ = act2.a

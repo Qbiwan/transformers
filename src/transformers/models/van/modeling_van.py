@@ -16,6 +16,7 @@
 
 import math
 from collections import OrderedDict
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
@@ -37,7 +38,6 @@ logger = logging.get_logger(__name__)
 
 # General docstring
 _CONFIG_FOR_DOC = "VanConfig"
-_FEAT_EXTRACTOR_FOR_DOC = "AutoFeatureExtractor"
 
 # Base docstring
 _CHECKPOINT_FOR_DOC = "Visual-Attention-Network/van-base"
@@ -53,23 +53,24 @@ VAN_PRETRAINED_MODEL_ARCHIVE_LIST = [
 ]
 
 
-# Stochastic depth implementation
-# Taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/layers/drop.py
-def drop_path(x, drop_prob: float = 0.0, training: bool = False):
+# Copied from transformers.models.convnext.modeling_convnext.drop_path
+def drop_path(input, drop_prob: float = 0.0, training: bool = False):
     """
-    Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks). This is the same as the
-    DropConnect impl I created for EfficientNet, etc networks, however, the original name is misleading as 'Drop
-    Connect' is a different form of dropout in a separate paper... See discussion:
-    https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for changing the layer and
-    argument names to 'drop path' rather than mix DropConnect as a layer name and use 'survival rate' as the argument.
+    Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+
+    Comment by Ross Wightman: This is the same as the DropConnect impl I created for EfficientNet, etc networks,
+    however, the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for changing the
+    layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use 'survival rate' as the
+    argument.
     """
     if drop_prob == 0.0 or not training:
-        return x
+        return input
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
-    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    shape = (input.shape[0],) + (1,) * (input.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = keep_prob + torch.rand(shape, dtype=input.dtype, device=input.device)
     random_tensor.floor_()  # binarize
-    output = x.div(keep_prob) * random_tensor
+    output = input.div(keep_prob) * random_tensor
     return output
 
 
@@ -77,15 +78,18 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
 class VanDropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
 
-    def __init__(self, drop_prob=None):
+    def __init__(self, drop_prob: Optional[float] = None) -> None:
         super().__init__()
         self.drop_prob = drop_prob
 
-    def forward(self, x):
-        return drop_path(x, self.drop_prob, self.training)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return drop_path(hidden_states, self.drop_prob, self.training)
+
+    def extra_repr(self) -> str:
+        return "p={}".format(self.drop_prob)
 
 
-class VanOverlappingPatchEmbedder(nn.Sequential):
+class VanOverlappingPatchEmbedder(nn.Module):
     """
     Downsamples the input using a patchify operation with a `stride` of 4 by default making adjacent windows overlap by
     half of the area. From [PVTv2: Improved Baselines with Pyramid Vision
@@ -99,8 +103,13 @@ class VanOverlappingPatchEmbedder(nn.Sequential):
         )
         self.normalization = nn.BatchNorm2d(hidden_size)
 
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        hidden_state = self.convolution(input)
+        hidden_state = self.normalization(hidden_state)
+        return hidden_state
 
-class VanMlpLayer(nn.Sequential):
+
+class VanMlpLayer(nn.Module):
     """
     MLP with depth-wise convolution, from [PVTv2: Improved Baselines with Pyramid Vision
     Transformer](https://arxiv.org/abs/2106.13797).
@@ -122,8 +131,17 @@ class VanMlpLayer(nn.Sequential):
         self.out_dense = nn.Conv2d(hidden_size, out_channels, kernel_size=1)
         self.dropout2 = nn.Dropout(dropout_rate)
 
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        hidden_state = self.in_dense(hidden_state)
+        hidden_state = self.depth_wise(hidden_state)
+        hidden_state = self.activation(hidden_state)
+        hidden_state = self.dropout1(hidden_state)
+        hidden_state = self.out_dense(hidden_state)
+        hidden_state = self.dropout2(hidden_state)
+        return hidden_state
 
-class VanLargeKernelAttention(nn.Sequential):
+
+class VanLargeKernelAttention(nn.Module):
     """
     Basic Large Kernel Attention (LKA).
     """
@@ -136,6 +154,12 @@ class VanLargeKernelAttention(nn.Sequential):
         )
         self.point_wise = nn.Conv2d(hidden_size, hidden_size, kernel_size=1)
 
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        hidden_state = self.depth_wise(hidden_state)
+        hidden_state = self.depth_wise_dilated(hidden_state)
+        hidden_state = self.point_wise(hidden_state)
+        return hidden_state
+
 
 class VanLargeKernelAttentionLayer(nn.Module):
     """
@@ -146,7 +170,7 @@ class VanLargeKernelAttentionLayer(nn.Module):
         super().__init__()
         self.attention = VanLargeKernelAttention(hidden_size)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         attention = self.attention(hidden_state)
         attended = hidden_state * attention
         return attended
@@ -171,7 +195,7 @@ class VanSpatialAttentionLayer(nn.Module):
         self.attention_layer = VanLargeKernelAttentionLayer(hidden_size)
         self.post_projection = nn.Conv2d(hidden_size, hidden_size, kernel_size=1)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         residual = hidden_state
         hidden_state = self.pre_projection(hidden_state)
         hidden_state = self.attention_layer(hidden_state)
@@ -189,7 +213,7 @@ class VanLayerScaling(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(initial_value * torch.ones((hidden_size)), requires_grad=True)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         # unsqueezing for broadcasting
         hidden_state = self.weight.unsqueeze(-1).unsqueeze(-1) * hidden_state
         return hidden_state
@@ -208,7 +232,7 @@ class VanLayer(nn.Module):
         drop_path_rate: float = 0.5,
     ):
         super().__init__()
-        self.drop_path = VanDropPath(drop_path) if drop_path_rate > 0.0 else nn.Identity()
+        self.drop_path = VanDropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
         self.pre_normomalization = nn.BatchNorm2d(hidden_size)
         self.attention = VanSpatialAttentionLayer(hidden_size, config.hidden_act)
         self.attention_scaling = VanLayerScaling(hidden_size, config.layer_scale_init_value)
@@ -218,7 +242,7 @@ class VanLayer(nn.Module):
         )
         self.mlp_scaling = VanLayerScaling(hidden_size, config.layer_scale_init_value)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         residual = hidden_state
         # attention
         hidden_state = self.pre_normomalization(hidden_state)
@@ -269,7 +293,7 @@ class VanStage(nn.Module):
         )
         self.normalization = nn.LayerNorm(hidden_size, eps=config.layer_norm_eps)
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         hidden_state = self.embeddings(hidden_state)
         hidden_state = self.layers(hidden_state)
         # rearrange b c h w -> b (h w) c
@@ -316,7 +340,12 @@ class VanEncoder(nn.Module):
                 )
             )
 
-    def forward(self, hidden_state, output_hidden_states=False, return_dict=True):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+    ) -> Union[Tuple, BaseModelOutputWithNoAttention]:
         all_hidden_states = () if output_hidden_states else None
 
         for _, stage_module in enumerate(self.stages):
@@ -345,7 +374,7 @@ class VanPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
-            nn.init.trunc_normal_(module.weight, std=0.02)
+            nn.init.trunc_normal_(module.weight, std=self.config.initializer_range)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.constant_(module.bias, 0)
         elif isinstance(module, nn.LayerNorm):
@@ -377,8 +406,8 @@ VAN_START_DOCSTRING = r"""
 VAN_INPUTS_DOCSTRING = r"""
     Args:
         pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Pixel values can be obtained using [`AutoFeatureExtractor`]. See
-            [`AutoFeatureExtractor.__call__`] for details.
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See
+            [`ConvNextImageProcessor.__call__`] for details.
 
         output_hidden_states (`bool`, *optional*):
             Whether or not to return the hidden states of all stages. See `hidden_states` under returned tensors for
@@ -389,7 +418,8 @@ VAN_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare VAN model outputting raw features without any specific head on top. Note, VAN does not have an embedding layer.",
+    "The bare VAN model outputting raw features without any specific head on top. Note, VAN does not have an embedding"
+    " layer.",
     VAN_START_DOCSTRING,
 )
 class VanModel(VanPreTrainedModel):
@@ -404,14 +434,18 @@ class VanModel(VanPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(VAN_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=BaseModelOutputWithPoolingAndNoAttention,
         config_class=_CONFIG_FOR_DOC,
         modality="vision",
         expected_output=_EXPECTED_OUTPUT_SHAPE,
     )
-    def forward(self, pixel_values, output_hidden_states=None, return_dict=None):
+    def forward(
+        self,
+        pixel_values: Optional[torch.FloatTensor],
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPoolingAndNoAttention]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -457,13 +491,18 @@ class VanForImageClassification(VanPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(VAN_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_IMAGE_CLASS_CHECKPOINT,
         output_type=ImageClassifierOutputWithNoAttention,
         config_class=_CONFIG_FOR_DOC,
         expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
     )
-    def forward(self, pixel_values=None, labels=None, output_hidden_states=None, return_dict=None):
+    def forward(
+        self,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, ImageClassifierOutputWithNoAttention]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the image classification/regression loss. Indices should be in `[0, ...,

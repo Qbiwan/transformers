@@ -31,12 +31,8 @@ from ...modeling_outputs import (
     MultipleChoiceModelOutput,
     SequenceClassifierOutput,
 )
-from ...modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from ...modeling_utils import PreTrainedModel
+from ...pytorch_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
 from ...utils import (
     ModelOutput,
     add_start_docstrings,
@@ -162,7 +158,8 @@ class VisualBertEmbeddings(nn.Module):
                 if (image_text_alignment_mask == 0).sum() != 0:
                     image_text_alignment_mask[image_text_alignment_mask == 0] = 1  # Avoid divide by zero error
                     logger.warning(
-                        "Found 0 values in `image_text_alignment_mask`. Setting them to 1 to avoid divide-by-zero error."
+                        "Found 0 values in `image_text_alignment_mask`. Setting them to 1 to avoid divide-by-zero"
+                        " error."
                     )
                 visual_position_embeddings = visual_position_embeddings / image_text_alignment_mask.unsqueeze(-1)
 
@@ -608,7 +605,7 @@ VISUAL_BERT_INPUTS_DOCSTRING = r"""
         input_ids (`torch.LongTensor` of shape `({0})`):
             Indices of input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`BertTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -742,10 +739,10 @@ class VisualBertModel(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image.
-        from transformers import BertTokenizer, VisualBertModel
+        from transformers import AutoTokenizer, VisualBertModel
         import torch
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertModel.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
 
         inputs = tokenizer("The capital of France is Paris.", return_tensors="pt")
@@ -798,12 +795,12 @@ class VisualBertModel(VisualBertPreTrainedModel):
         if visual_embeds is not None:
             combined_attention_mask = torch.cat((attention_mask, visual_attention_mask), dim=-1)
             extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-                combined_attention_mask, [batch_size, input_shape + visual_input_shape], device
+                combined_attention_mask, (batch_size, input_shape + visual_input_shape)
             )
 
         else:
             extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-                attention_mask, [batch_size, input_shape], device
+                attention_mask, (batch_size, input_shape)
             )
 
         # Prepare head mask if needed
@@ -874,6 +871,8 @@ class VisualBertModel(VisualBertPreTrainedModel):
     VISUAL_BERT_START_DOCSTRING,
 )
 class VisualBertForPreTraining(VisualBertPreTrainedModel):
+    _keys_to_ignore_on_load_missing = ["cls.predictions.decoder.weight", "cls.predictions.decoder.bias"]
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -927,12 +926,12 @@ class VisualBertForPreTraining(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image in the batch.
-        from transformers import BertTokenizer, VisualBertForPreTraining
+        from transformers import AutoTokenizer, VisualBertForPreTraining
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertForPreTraining.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
 
-        inputs = tokenizer("The capital of France is {mask}.", return_tensors="pt")
+        inputs = tokenizer("The capital of France is [MASK].", return_tensors="pt")
         visual_embeds = get_visual_embeddings(image).unsqueeze(0)
         visual_token_type_ids = torch.ones(visual_embeds.shape[:-1], dtype=torch.long)
         visual_attention_mask = torch.ones(visual_embeds.shape[:-1], dtype=torch.float)
@@ -982,7 +981,7 @@ class VisualBertForPreTraining(VisualBertPreTrainedModel):
             total_size = attention_mask.size(-1) + visual_attention_mask.size(-1)
             if labels.size(-1) != total_size:
                 raise ValueError(
-                    f"The labels provided should have same sequence length as total attention mask. "
+                    "The labels provided should have same sequence length as total attention mask. "
                     f"Found labels with sequence length {labels.size(-1)}, expected {total_size}."
                 )
 
@@ -995,7 +994,7 @@ class VisualBertForPreTraining(VisualBertPreTrainedModel):
             total_size = attention_mask.size(-1) + visual_attention_mask.size(-1)
             if labels.size(-1) != total_size:
                 raise ValueError(
-                    f"The labels provided should have same sequence length as total attention mask. "
+                    "The labels provided should have same sequence length as total attention mask. "
                     f"Found labels with sequence length {labels.size(-1)}, expected {total_size}."
                 )
 
@@ -1066,10 +1065,10 @@ class VisualBertForMultipleChoice(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image in the batch.
-        from transformers import BertTokenizer, VisualBertForMultipleChoice
+        from transformers import AutoTokenizer, VisualBertForMultipleChoice
         import torch
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertForMultipleChoice.from_pretrained("uclanlp/visualbert-vcr")
 
         prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced."
@@ -1217,10 +1216,10 @@ class VisualBertForQuestionAnswering(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image in the batch.
-        from transformers import BertTokenizer, VisualBertForQuestionAnswering
+        from transformers import AutoTokenizer, VisualBertForQuestionAnswering
         import torch
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertForQuestionAnswering.from_pretrained("uclanlp/visualbert-vqa")
 
         text = "Who is eating the apple?"
@@ -1343,10 +1342,10 @@ class VisualBertForVisualReasoning(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image in the batch.
-        from transformers import BertTokenizer, VisualBertForVisualReasoning
+        from transformers import AutoTokenizer, VisualBertForVisualReasoning
         import torch
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertForVisualReasoning.from_pretrained("uclanlp/visualbert-nlvr2")
 
         text = "Who is eating the apple?"
@@ -1436,7 +1435,7 @@ class VisualBertRegionToPhraseAttention(nn.Module):
     def forward(self, query, key, attention_mask):
         attention_mask = attention_mask.to(query.dtype)
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-        attention_mask = (1.0 - attention_mask) * -10000.0
+        attention_mask = (1.0 - attention_mask) * torch.finfo(query.dtype).min
 
         mixed_query_layer = self.query(query)
         mixed_key_layer = self.key(key)
@@ -1462,6 +1461,8 @@ class VisualBertRegionToPhraseAttention(nn.Module):
     VISUAL_BERT_START_DOCSTRING,
 )
 class VisualBertForRegionToPhraseAlignment(VisualBertPreTrainedModel):
+    _keys_to_ignore_on_load_missing = ["cls.predictions.decoder.bias"]
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -1507,10 +1508,10 @@ class VisualBertForRegionToPhraseAlignment(VisualBertPreTrainedModel):
 
         ```python
         # Assumption: *get_visual_embeddings(image)* gets the visual embeddings of the image in the batch.
-        from transformers import BertTokenizer, VisualBertForRegionToPhraseAlignment
+        from transformers import AutoTokenizer, VisualBertForRegionToPhraseAlignment
         import torch
 
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = VisualBertForRegionToPhraseAlignment.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
 
         text = "Who is eating the apple?"
@@ -1586,7 +1587,6 @@ class VisualBertForRegionToPhraseAlignment(VisualBertPreTrainedModel):
         loss = None
 
         if labels is not None:
-
             # scores = batch x selected position x visual_feature
             # scores = selected_positions.bmm(visual_features.transpose(1,2))
             # label = batch x selected_postion x needed position

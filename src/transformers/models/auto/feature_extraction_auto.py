@@ -37,26 +37,67 @@ logger = logging.get_logger(__name__)
 
 FEATURE_EXTRACTOR_MAPPING_NAMES = OrderedDict(
     [
+        ("audio-spectrogram-transformer", "ASTFeatureExtractor"),
         ("beit", "BeitFeatureExtractor"),
-        ("detr", "DetrFeatureExtractor"),
-        ("deit", "DeiTFeatureExtractor"),
-        ("hubert", "Wav2Vec2FeatureExtractor"),
-        ("speech_to_text", "Speech2TextFeatureExtractor"),
-        ("vit", "ViTFeatureExtractor"),
-        ("wav2vec2", "Wav2Vec2FeatureExtractor"),
-        ("detr", "DetrFeatureExtractor"),
-        ("layoutlmv2", "LayoutLMv2FeatureExtractor"),
+        ("chinese_clip", "ChineseCLIPFeatureExtractor"),
+        ("clap", "ClapFeatureExtractor"),
         ("clip", "CLIPFeatureExtractor"),
-        ("perceiver", "PerceiverFeatureExtractor"),
-        ("swin", "ViTFeatureExtractor"),
-        ("vit_mae", "ViTFeatureExtractor"),
-        ("segformer", "SegformerFeatureExtractor"),
+        ("clipseg", "ViTFeatureExtractor"),
+        ("conditional_detr", "ConditionalDetrFeatureExtractor"),
         ("convnext", "ConvNextFeatureExtractor"),
-        ("van", "ConvNextFeatureExtractor"),
-        ("resnet", "ConvNextFeatureExtractor"),
-        ("regnet", "ConvNextFeatureExtractor"),
-        ("poolformer", "PoolFormerFeatureExtractor"),
+        ("cvt", "ConvNextFeatureExtractor"),
+        ("data2vec-audio", "Wav2Vec2FeatureExtractor"),
+        ("data2vec-vision", "BeitFeatureExtractor"),
+        ("deformable_detr", "DeformableDetrFeatureExtractor"),
+        ("deit", "DeiTFeatureExtractor"),
+        ("detr", "DetrFeatureExtractor"),
+        ("dinat", "ViTFeatureExtractor"),
+        ("donut-swin", "DonutFeatureExtractor"),
+        ("dpt", "DPTFeatureExtractor"),
+        ("flava", "FlavaFeatureExtractor"),
+        ("glpn", "GLPNFeatureExtractor"),
+        ("groupvit", "CLIPFeatureExtractor"),
+        ("hubert", "Wav2Vec2FeatureExtractor"),
+        ("imagegpt", "ImageGPTFeatureExtractor"),
+        ("layoutlmv2", "LayoutLMv2FeatureExtractor"),
+        ("layoutlmv3", "LayoutLMv3FeatureExtractor"),
+        ("levit", "LevitFeatureExtractor"),
         ("maskformer", "MaskFormerFeatureExtractor"),
+        ("mctct", "MCTCTFeatureExtractor"),
+        ("mobilenet_v1", "MobileNetV1FeatureExtractor"),
+        ("mobilenet_v2", "MobileNetV2FeatureExtractor"),
+        ("mobilevit", "MobileViTFeatureExtractor"),
+        ("nat", "ViTFeatureExtractor"),
+        ("owlvit", "OwlViTFeatureExtractor"),
+        ("perceiver", "PerceiverFeatureExtractor"),
+        ("poolformer", "PoolFormerFeatureExtractor"),
+        ("regnet", "ConvNextFeatureExtractor"),
+        ("resnet", "ConvNextFeatureExtractor"),
+        ("segformer", "SegformerFeatureExtractor"),
+        ("sew", "Wav2Vec2FeatureExtractor"),
+        ("sew-d", "Wav2Vec2FeatureExtractor"),
+        ("speech_to_text", "Speech2TextFeatureExtractor"),
+        ("speecht5", "SpeechT5FeatureExtractor"),
+        ("swiftformer", "ViTFeatureExtractor"),
+        ("swin", "ViTFeatureExtractor"),
+        ("swinv2", "ViTFeatureExtractor"),
+        ("table-transformer", "DetrFeatureExtractor"),
+        ("timesformer", "VideoMAEFeatureExtractor"),
+        ("tvlt", "TvltFeatureExtractor"),
+        ("unispeech", "Wav2Vec2FeatureExtractor"),
+        ("unispeech-sat", "Wav2Vec2FeatureExtractor"),
+        ("van", "ConvNextFeatureExtractor"),
+        ("videomae", "VideoMAEFeatureExtractor"),
+        ("vilt", "ViltFeatureExtractor"),
+        ("vit", "ViTFeatureExtractor"),
+        ("vit_mae", "ViTFeatureExtractor"),
+        ("vit_msn", "ViTFeatureExtractor"),
+        ("wav2vec2", "Wav2Vec2FeatureExtractor"),
+        ("wav2vec2-conformer", "Wav2Vec2FeatureExtractor"),
+        ("wavlm", "Wav2Vec2FeatureExtractor"),
+        ("whisper", "WhisperFeatureExtractor"),
+        ("xclip", "CLIPFeatureExtractor"),
+        ("yolos", "YolosFeatureExtractor"),
     ]
 )
 
@@ -69,12 +110,20 @@ def feature_extractor_class_from_name(class_name: str):
             module_name = model_type_to_module_name(module_name)
 
             module = importlib.import_module(f".{module_name}", "transformers.models")
-            return getattr(module, class_name)
-            break
+            try:
+                return getattr(module, class_name)
+            except AttributeError:
+                continue
 
-    for config, extractor in FEATURE_EXTRACTOR_MAPPING._extra_content.items():
+    for _, extractor in FEATURE_EXTRACTOR_MAPPING._extra_content.items():
         if getattr(extractor, "__name__", None) == class_name:
             return extractor
+
+    # We did not fine the class, but maybe it's because a dep is missing. In that case, the class will be in the main
+    # init and we return the proper dummy to get an appropriate error message.
+    main_module = importlib.import_module("transformers")
+    if hasattr(main_module, class_name):
+        return getattr(main_module, class_name)
 
     return None
 
@@ -116,7 +165,7 @@ def get_feature_extractor_config(
             'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
         use_auth_token (`str` or *bool*, *optional*):
             The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-            when running `transformers-cli login` (stored in `~/.huggingface`).
+            when running `huggingface-cli login` (stored in `~/.huggingface`).
         revision (`str`, *optional*, defaults to `"main"`):
             The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
             git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
@@ -221,7 +270,7 @@ class AutoFeatureExtractor:
                 'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
             use_auth_token (`str` or *bool*, *optional*):
                 The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-                when running `transformers-cli login` (stored in `~/.huggingface`).
+                when running `huggingface-cli login` (stored in `~/.huggingface`).
             revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
                 git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
@@ -255,7 +304,7 @@ class AutoFeatureExtractor:
         >>> feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/wav2vec2-base-960h")
 
         >>> # If feature extractor files are in a directory (e.g. feature extractor was saved using *save_pretrained('./test/saved_model/')*)
-        >>> feature_extractor = AutoFeatureExtractor.from_pretrained("./test/saved_model/")
+        >>> # feature_extractor = AutoFeatureExtractor.from_pretrained("./test/saved_model/")
         ```"""
         config = kwargs.pop("config", None)
         trust_remote_code = kwargs.pop("trust_remote_code", False)
@@ -285,15 +334,8 @@ class AutoFeatureExtractor:
                         "in that repo on your local machine. Make sure you have read the code there to avoid "
                         "malicious use, then set the option `trust_remote_code=True` to remove this error."
                     )
-                if kwargs.get("revision", None) is None:
-                    logger.warning(
-                        "Explicitly passing a `revision` is encouraged when loading a feature extractor with custom "
-                        "code to ensure no malicious code has been contributed in a newer revision."
-                    )
-
-                module_file, class_name = feature_extractor_auto_map.split(".")
                 feature_extractor_class = get_class_from_dynamic_module(
-                    pretrained_model_name_or_path, module_file + ".py", class_name, **kwargs
+                    feature_extractor_auto_map, pretrained_model_name_or_path, **kwargs
                 )
             else:
                 feature_extractor_class = feature_extractor_class_from_name(feature_extractor_class)
@@ -307,7 +349,7 @@ class AutoFeatureExtractor:
         raise ValueError(
             f"Unrecognized feature extractor in {pretrained_model_name_or_path}. Should have a "
             f"`feature_extractor_type` key in its {FEATURE_EXTRACTOR_NAME} of {CONFIG_NAME}, or one of the following "
-            "`model_type` keys in its {CONFIG_NAME}: {', '.join(c for c in FEATURE_EXTRACTOR_MAPPING_NAMES.keys())}"
+            f"`model_type` keys in its {CONFIG_NAME}: {', '.join(c for c in FEATURE_EXTRACTOR_MAPPING_NAMES.keys())}"
         )
 
     @staticmethod

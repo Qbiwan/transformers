@@ -28,15 +28,12 @@ from transformers.testing_utils import (
     require_tensorflow_probability,
     require_tf,
     require_torch,
-    require_torch_scatter,
     slow,
 )
 
-from .test_pipelines_common import PipelineTestCaseMeta
-
 
 @is_pipeline_test
-class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
+class TQAPipelineTests(unittest.TestCase):
     # Putting it there for consistency, but TQA do not have fast tokenizer
     # which are needed to generate automatic tests
     model_mapping = MODEL_FOR_TABLE_QUESTION_ANSWERING_MAPPING
@@ -92,7 +89,8 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             },
             query=[
                 "What repository has the largest number of stars?",
-                "Given that the numbers of stars defines if a repository is active, what repository is the most active?",
+                "Given that the numbers of stars defines if a repository is active, what repository is the most"
+                " active?",
                 "What is the number of repositories?",
                 "What is the average number of stars?",
                 "What is the total amount of stars?",
@@ -146,7 +144,6 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             )
 
     @require_torch
-    @require_torch_scatter
     def test_small_model_pt(self):
         model_id = "lysandre/tiny-tapas-random-wtq"
         model = AutoModelForTableQuestionAnswering.from_pretrained(model_id)
@@ -194,7 +191,8 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             },
             query=[
                 "What repository has the largest number of stars?",
-                "Given that the numbers of stars defines if a repository is active, what repository is the most active?",
+                "Given that the numbers of stars defines if a repository is active, what repository is the most"
+                " active?",
                 "What is the number of repositories?",
                 "What is the average number of stars?",
                 "What is the total amount of stars?",
@@ -248,7 +246,6 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             )
 
     @require_torch
-    @require_torch_scatter
     def test_slow_tokenizer_sqa_pt(self):
         model_id = "lysandre/tiny-tapas-random-sqa"
         model = AutoModelForTableQuestionAnswering.from_pretrained(model_id)
@@ -313,7 +310,8 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             },
             query=[
                 "What repository has the largest number of stars?",
-                "Given that the numbers of stars defines if a repository is active, what repository is the most active?",
+                "Given that the numbers of stars defines if a repository is active, what repository is the most"
+                " active?",
                 "What is the number of repositories?",
                 "What is the average number of stars?",
                 "What is the total amount of stars?",
@@ -434,7 +432,8 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             },
             query=[
                 "What repository has the largest number of stars?",
-                "Given that the numbers of stars defines if a repository is active, what repository is the most active?",
+                "Given that the numbers of stars defines if a repository is active, what repository is the most"
+                " active?",
                 "What is the number of repositories?",
                 "What is the average number of stars?",
                 "What is the total amount of stars?",
@@ -488,7 +487,7 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             )
 
     @slow
-    @require_torch_scatter
+    @require_torch
     def test_integration_wtq_pt(self):
         table_querier = pipeline("table-question-answering")
 
@@ -582,7 +581,7 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
         self.assertListEqual(results, expected_results)
 
     @slow
-    @require_torch_scatter
+    @require_torch
     def test_integration_sqa_pt(self):
         table_querier = pipeline(
             "table-question-answering",
@@ -630,5 +629,33 @@ class TQAPipelineTests(unittest.TestCase, metaclass=PipelineTestCaseMeta):
             {"answer": "69", "coordinates": [(2, 2)], "cells": ["69"]},
             {"answer": "59", "coordinates": [(2, 1)], "cells": ["59"]},
             {"answer": "28 november 1967", "coordinates": [(2, 3)], "cells": ["28 november 1967"]},
+        ]
+        self.assertListEqual(results, expected_results)
+
+    @slow
+    @require_torch
+    def test_large_model_pt_tapex(self):
+        model_id = "microsoft/tapex-large-finetuned-wtq"
+        table_querier = pipeline(
+            "table-question-answering",
+            model=model_id,
+        )
+        data = {
+            "Actors": ["Brad Pitt", "Leonardo Di Caprio", "George Clooney"],
+            "Age": ["56", "45", "59"],
+            "Number of movies": ["87", "53", "69"],
+            "Date of birth": ["7 february 1967", "10 june 1996", "28 november 1967"],
+        }
+        queries = [
+            "How many movies has George Clooney played in?",
+            "How old is Mr Clooney ?",
+            "What's the date of birth of Leonardo ?",
+        ]
+        results = table_querier(data, queries, sequential=True)
+
+        expected_results = [
+            {"answer": " 69"},
+            {"answer": " 59"},
+            {"answer": " 10 june 1996"},
         ]
         self.assertListEqual(results, expected_results)

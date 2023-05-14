@@ -20,14 +20,14 @@ import random
 from functools import partial
 from typing import Callable, Optional, Tuple
 
-import numpy as np
-
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict, unfreeze
+import numpy as np
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
+from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 from jax.random import PRNGKey
 
@@ -54,7 +54,6 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "google/pegasus-large"
 _CONFIG_FOR_DOC = "PegasusConfig"
-_TOKENIZER_FOR_DOC = "PegasusTokenizer"
 
 PEGASUS_START_DOCSTRING = r"""
     This model inherits from [`FlaxPreTrainedModel`]. Check the superclass documentation for the generic methods the
@@ -96,7 +95,7 @@ PEGASUS_INPUTS_DOCSTRING = r"""
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
             it.
 
-            Indices can be obtained using [`PegasusTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -110,7 +109,7 @@ PEGASUS_INPUTS_DOCSTRING = r"""
         decoder_input_ids (`jnp.ndarray` of shape `(batch_size, target_sequence_length)`, *optional*):
             Indices of decoder input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`PegasusTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are decoder input IDs?](../glossary#decoder-input-ids)
@@ -143,7 +142,7 @@ PEGASUS_ENCODE_INPUTS_DOCSTRING = r"""
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
             it.
 
-            Indices can be obtained using [`PegasusTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -172,7 +171,7 @@ PEGASUS_DECODE_INPUTS_DOCSTRING = r"""
         decoder_input_ids (`jnp.ndarray` of shape `(batch_size, target_sequence_length)`):
             Indices of decoder input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`PegasusTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are decoder input IDs?](../glossary#decoder-input-ids)
@@ -374,7 +373,7 @@ class FlaxPegasusAttention(nn.Module):
             attention_bias = lax.select(
                 attention_mask > 0,
                 jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-                jnp.full(attention_mask.shape, float("-inf")).astype(self.dtype),
+                jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
             )
         else:
             attention_bias = None
@@ -543,7 +542,7 @@ class FlaxPegasusDecoderLayer(nn.Module):
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(dtype=self.dtype, epsilon=1e-05)
         self.fc1 = nn.Dense(
-            self.config.encoder_ffn_dim,
+            self.config.decoder_ffn_dim,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(self.config.init_std),
         )
@@ -830,6 +829,7 @@ class FlaxPegasusModule(nn.Module):
             self.config.vocab_size,
             self.config.d_model,
             embedding_init=jax.nn.initializers.normal(self.config.init_std),
+            dtype=self.dtype,
         )
 
         self.encoder = FlaxPegasusEncoder(self.config, dtype=self.dtype, embed_tokens=self.shared)
@@ -901,12 +901,13 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
         input_shape: Tuple[int] = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
-        **kwargs
+        _do_init: bool = True,
+        **kwargs,
     ):
         module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype)
+        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
+    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
         # init input tensors
         input_ids = jnp.zeros(input_shape, dtype="i4")
         attention_mask = jnp.ones_like(input_ids)
@@ -920,7 +921,7 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
-        return self.module.init(
+        random_params = self.module.init(
             rngs,
             input_ids,
             attention_mask,
@@ -929,6 +930,16 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
             position_ids,
             decoder_position_ids,
         )["params"]
+
+        if params is not None:
+            random_params = flatten_dict(unfreeze(random_params))
+            params = flatten_dict(unfreeze(params))
+            for missing_key in self._missing_keys:
+                params[missing_key] = random_params[missing_key]
+            self._missing_keys = set()
+            return freeze(unflatten_dict(params))
+        else:
+            return random_params
 
     def init_cache(self, batch_size, max_length, encoder_outputs):
         r"""
@@ -991,10 +1002,10 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import PegasusTokenizer, FlaxPegasusForConditionalGeneration
+        >>> from transformers import AutoTokenizer, FlaxPegasusForConditionalGeneration
 
         >>> model = FlaxPegasusForConditionalGeneration.from_pretrained("google/pegasus-large")
-        >>> tokenizer = PegasusTokenizer.from_pretrained("google/pegasus-large")
+        >>> tokenizer = AutoTokenizer.from_pretrained("google/pegasus-large")
 
         >>> text = "My friends are cool but they eat too many carbs."
         >>> inputs = tokenizer(text, max_length=1024, return_tensors="np")
@@ -1058,10 +1069,10 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
 
         ```python
         >>> import jax.numpy as jnp
-        >>> from transformers import PegasusTokenizer, FlaxPegasusForConditionalGeneration
+        >>> from transformers import AutoTokenizer, FlaxPegasusForConditionalGeneration
 
         >>> model = FlaxPegasusForConditionalGeneration.from_pretrained("google/pegasus-large")
-        >>> tokenizer = PegasusTokenizer.from_pretrained("google/pegasus-large")
+        >>> tokenizer = AutoTokenizer.from_pretrained("google/pegasus-large")
 
         >>> text = "My friends are cool but they eat too many carbs."
         >>> inputs = tokenizer(text, max_length=1024, return_tensors="np")
@@ -1219,9 +1230,7 @@ class FlaxPegasusModel(FlaxPegasusPreTrainedModel):
     module_class = FlaxPegasusModule
 
 
-append_call_sample_docstring(
-    FlaxPegasusModel, _TOKENIZER_FOR_DOC, _CHECKPOINT_FOR_DOC, FlaxSeq2SeqModelOutput, _CONFIG_FOR_DOC
-)
+append_call_sample_docstring(FlaxPegasusModel, _CHECKPOINT_FOR_DOC, FlaxSeq2SeqModelOutput, _CONFIG_FOR_DOC)
 
 
 # Copied from transformers.models.bart.modeling_flax_bart.FlaxBartForConditionalGenerationModule with Bart->Pegasus
@@ -1328,10 +1337,10 @@ class FlaxPegasusForConditionalGeneration(FlaxPegasusPreTrainedModel):
 
         ```python
         >>> import jax.numpy as jnp
-        >>> from transformers import PegasusTokenizer, FlaxPegasusForConditionalGeneration
+        >>> from transformers import AutoTokenizer, FlaxPegasusForConditionalGeneration
 
         >>> model = FlaxPegasusForConditionalGeneration.from_pretrained("google/pegasus-large")
-        >>> tokenizer = PegasusTokenizer.from_pretrained("google/pegasus-large")
+        >>> tokenizer = AutoTokenizer.from_pretrained("google/pegasus-large")
 
         >>> text = "My friends are cool but they eat too many carbs."
         >>> inputs = tokenizer(text, max_length=1024, return_tensors="np")
@@ -1448,7 +1457,7 @@ class FlaxPegasusForConditionalGeneration(FlaxPegasusPreTrainedModel):
         attention_mask: Optional[jnp.DeviceArray] = None,
         decoder_attention_mask: Optional[jnp.DeviceArray] = None,
         encoder_outputs=None,
-        **kwargs
+        **kwargs,
     ):
         # initializing the cache
         batch_size, seq_length = decoder_input_ids.shape
@@ -1483,30 +1492,38 @@ FLAX_PEGASUS_CONDITIONAL_GENERATION_DOCSTRING = """
 
     Summarization example:
 
-        >>> from transformers import PegasusTokenizer, FlaxPegasusForConditionalGeneration
+    ```pyton
+    >>> from transformers import AutoTokenizer, FlaxPegasusForConditionalGeneration
 
-        >>> model = FlaxPegasusForConditionalGeneration.from_pretrained('google/pegasus-large') >>> tokenizer =
-        PegasusTokenizer.from_pretrained('google/pegasus-large')
+    >>> model = FlaxPegasusForConditionalGeneration.from_pretrained('google/pegasus-large')
+    >>> tokenizer = AutoTokenizer.from_pretrained('google/pegasus-large')
 
-        >>> ARTICLE_TO_SUMMARIZE = "My friends are cool but they eat too many carbs." >>> inputs =
-        tokenizer([ARTICLE_TO_SUMMARIZE], max_length=1024, return_tensors='np')
+    >>> ARTICLE_TO_SUMMARIZE = "My friends are cool but they eat too many carbs."
+    >>> inputs = tokenizer([ARTICLE_TO_SUMMARIZE], max_length=1024, return_tensors='np')
 
-        >>> # Generate Summary >>> summary_ids = model.generate(inputs['input_ids']).sequences >>>
-        print(tokenizer.batch_decode(summary_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
+    >>> # Generate Summary
+    >>> summary_ids = model.generate(inputs['input_ids']).sequences
+    >>> print(tokenizer.batch_decode(summary_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
+    ```
 
     Mask filling example:
 
-        >>> from transformers import PegasusTokenizer, FlaxPegasusForConditionalGeneration >>> tokenizer =
-        PegasusTokenizer.from_pretrained('google/pegasus-large') >>> TXT = "My friends are <mask> but they eat too many
-        carbs."
+    ```python
+    >>> from transformers import AutoTokenizer, FlaxPegasusForConditionalGeneration
 
-        >>> model = FlaxPegasusForConditionalGeneration.from_pretrained('google/pegasus-large') >>> input_ids =
-        tokenizer([TXT], return_tensors='np')['input_ids'] >>> logits = model(input_ids).logits
+    >>> tokenizer = AutoTokenizer.from_pretrained("google/pegasus-large")
+    >>> TXT = "My friends are <mask> but they eat too many carbs."
 
-        >>> masked_index = (input_ids[0] == tokenizer.mask_token_id).nonzero().item() >>> probs =
-        jax.nn.softmax(logits[0, masked_index], axis=0) >>> values, predictions = jax.lax.top_k(probs)
+    >>> model = FlaxPegasusForConditionalGeneration.from_pretrained("google/pegasus-large")
+    >>> input_ids = tokenizer([TXT], return_tensors="np")["input_ids"]
+    >>> logits = model(input_ids).logits
 
-        >>> tokenizer.decode(predictions).split()
+    >>> masked_index = (input_ids[0] == tokenizer.mask_token_id).nonzero().item()
+    >>> probs = jax.nn.softmax(logits[0, masked_index], axis=0)
+    >>> values, predictions = jax.lax.top_k(probs)
+
+    >>> tokenizer.decode(predictions).split()
+    ```
 """
 
 overwrite_call_docstring(

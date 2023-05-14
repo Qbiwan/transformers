@@ -20,7 +20,8 @@ from typing import Optional, Tuple, Union
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict, unfreeze
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
+from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 from jax.random import PRNGKey
 
@@ -84,11 +85,11 @@ SPEECH_ENCODER_DECODER_START_DOCSTRING = r"""
 SPEECH_ENCODER_DECODER_INPUTS_DOCSTRING = r"""
     Args:
         inputs (`jnp.ndarray` of shape `(batch_size, sequence_length)` or `(batch_size, sequence_length, feature_dim)`, *optional*):
-            Float values of input raw speech waveform or speech features. Values can be obtained by loading a *.flac*
-            or *.wav* audio file into an array of type *List[float]* or a *numpy.ndarray*, *e.g.* via the soundfile
-            library (*pip install soundfile*). To prepare the array into *inputs*, either the [`Wav2Vec2Processor`] or
+            Float values of input raw speech waveform or speech features. Values can be obtained by loading a `.flac`
+            or `.wav` audio file into an array of type `List[float]` or a `numpy.ndarray`, *e.g.* via the soundfile
+            library (`pip install soundfile`). To prepare the array into `inputs`, either the [`Wav2Vec2Processor`] or
             [`Speech2TextProcessor`] should be used for padding and conversion into a tensor of type
-            *torch.FloatTensor*.
+            `torch.FloatTensor`.
         attention_mask (`jnp.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
             Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
 
@@ -226,10 +227,14 @@ class FlaxSpeechEncoderDecoderModule(nn.Module):
         else:
             self.enc_to_dec_proj = None
 
-    def _get_feat_extract_output_lengths(self, input_lengths: Union[jnp.ndarray, int]):
+    def _get_feat_extract_output_lengths(
+        self, input_lengths: Union[jnp.ndarray, int], add_adapter: Optional[bool] = None
+    ):
         """
         Computes the output length of the convolutional layers
         """
+
+        add_adapter = self.config.encoder.add_adapter if add_adapter is None else add_adapter
 
         def _conv_out_length(input_length, kernel_size, stride):
             # 1D convolutional layer output length formula taken
@@ -238,6 +243,10 @@ class FlaxSpeechEncoderDecoderModule(nn.Module):
 
         for kernel_size, stride in zip(self.config.encoder.conv_kernel, self.config.encoder.conv_stride):
             input_lengths = _conv_out_length(input_lengths, kernel_size, stride)
+
+        if add_adapter:
+            for _ in range(self.config.encoder.num_adapter_layers):
+                input_lengths = _conv_out_length(input_lengths, 1, self.config.encoder.adapter_stride)
 
         return input_lengths
 
@@ -335,16 +344,22 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         input_shape: Optional[Tuple] = None,
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
-        **kwargs
+        _do_init: bool = True,
+        **kwargs,
     ):
+        if not _do_init:
+            raise ValueError(
+                "`FlaxSpeechEncoderDecoderModel` cannot be created without initializing, `_do_init` must be `True`."
+            )
+
         if config.decoder.cross_attention_hidden_size is not None:
             # Raise ValueError or option to project enc to dec hidden_size (eg EncAdapterLayer)
             if config.decoder.cross_attention_hidden_size != config.encoder.hidden_size:
                 raise ValueError(
-                    "If `cross_attention_hidden_size` is specified in the decoder's configuration, "
-                    "it has to be equal to the encoder's `hidden_size`. "
-                    f"Got {config.decoder.cross_attention_hidden_size} for `config.decoder.cross_attention_hidden_size` "
-                    f"and {config.encoder.hidden_size} for `config.encoder.hidden_size`."
+                    "If `cross_attention_hidden_size` is specified in the decoder's configuration, it has to be equal"
+                    f" to the encoder's `hidden_size`. Got {config.decoder.cross_attention_hidden_size} for"
+                    f" `config.decoder.cross_attention_hidden_size` and {config.encoder.hidden_size} for"
+                    " `config.encoder.hidden_size`."
                 )
 
         # make sure input & output embeddings are not tied
@@ -357,9 +372,9 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
             decoder_input_length = module._get_feat_extract_output_lengths(encoder_input_length)
             input_shape = ((1, encoder_input_length), (1, decoder_input_length))
 
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype)
+        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
+    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
         encoder_input_shape, decoder_input_shape = input_shape
 
         # init input DeviceArrays
@@ -373,7 +388,8 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         decoder_batch_size, decoder_sequence_length = decoder_input_ids.shape
         if not decoder_batch_size == batch_size:
             raise ValueError(
-                f"The inputs of encoder and decoder should have the same batch size, but got {batch_size} for encoder and {decoder_batch_size} for decoder."
+                f"The inputs of encoder and decoder should have the same batch size, but got {batch_size} for encoder"
+                f" and {decoder_batch_size} for decoder."
             )
         decoder_position_ids = jnp.broadcast_to(
             jnp.arange(decoder_sequence_length)[None, :], (decoder_batch_size, decoder_sequence_length)
@@ -382,7 +398,7 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
-        return self.module.init(
+        random_params = self.module.init(
             rngs,
             inputs,
             attention_mask,
@@ -390,6 +406,16 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
             decoder_attention_mask,
             decoder_position_ids,
         )["params"]
+
+        if params is not None:
+            random_params = flatten_dict(unfreeze(random_params))
+            params = flatten_dict(unfreeze(params))
+            for missing_key in self._missing_keys:
+                params[missing_key] = random_params[missing_key]
+            self._missing_keys = set()
+            return freeze(unflatten_dict(params))
+        else:
+            return random_params
 
     def init_cache(self, batch_size, max_length, encoder_outputs):
         r"""
@@ -432,8 +458,10 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         )
         return unfreeze(init_variables["cache"])
 
-    def _get_feat_extract_output_lengths(self, input_lengths: Union[jnp.ndarray, int]):
-        return self.module._get_feat_extract_output_lengths(input_lengths)
+    def _get_feat_extract_output_lengths(
+        self, input_lengths: Union[jnp.ndarray, int], add_adapter: Optional[bool] = None
+    ):
+        return self.module._get_feat_extract_output_lengths(input_lengths, add_adapter=add_adapter)
 
     @add_start_docstrings(SPEECH_ENCODER_DECODER_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=FlaxBaseModelOutput, config_class=_CONFIG_FOR_DOC)
@@ -587,7 +615,6 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         def _decoder_forward(
             module, decoder_input_ids, decoder_attention_mask, decoder_position_ids, encoder_hidden_states, **kwargs
         ):
-
             projection_module = module._get_projection_module()
             decoder_module = module._get_decoder_module()
 
@@ -599,7 +626,7 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
                 decoder_input_ids,
                 decoder_attention_mask,
                 decoder_position_ids,
-                encoder_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
                 **kwargs,
             )
 
@@ -653,12 +680,12 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         Examples:
 
         ```python
-        >>> from transformers import FlaxSpeechEncoderDecoderModel, BartTokenizer
+        >>> from transformers import FlaxSpeechEncoderDecoderModel, AutoTokenizer
 
         >>> # load a fine-tuned wav2vec2-2-bart model
         >>> model = FlaxSpeechEncoderDecoderModel.from_pretrained("patrickvonplaten/wav2vec2-2-bart-large")
         >>> # load output tokenizer
-        >>> tokenizer_output = BartTokenizer.from_pretrained("facebook/bart-large")
+        >>> tokenizer_output = AutoTokenizer.from_pretrained("facebook/bart-large")
 
         >>> inputs = jnp.ones((2, 5000), dtype=jnp.float32)
 
@@ -685,7 +712,8 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         # prepare decoder inputs
         if decoder_input_ids is None:
             raise ValueError(
-                "`decoder_input_ids` cannot be `None`. For sequence to sequence training, `decoder_position_ids` must be specified as an input argument."
+                "`decoder_input_ids` cannot be `None`. For sequence to sequence training, `decoder_position_ids` must"
+                " be specified as an input argument."
             )
         if decoder_attention_mask is None:
             decoder_attention_mask = jnp.ones_like(decoder_input_ids)
@@ -720,7 +748,7 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         attention_mask: Optional[jnp.DeviceArray] = None,
         decoder_attention_mask: Optional[jnp.DeviceArray] = None,
         encoder_outputs=None,
-        **kwargs
+        **kwargs,
     ):
         # initializing the cache
         batch_size, seq_length = decoder_input_ids.shape
@@ -757,7 +785,7 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
         encoder_pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = None,
         decoder_pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = None,
         *model_args,
-        **kwargs
+        **kwargs,
     ) -> FlaxPreTrainedModel:
         r"""
         Instantiate an encoder and a decoder from one or two base classes of the library from pretrained model
@@ -867,10 +895,9 @@ class FlaxSpeechEncoderDecoderModel(FlaxPreTrainedModel):
                 )
                 if decoder_config.is_decoder is False or decoder_config.add_cross_attention is False:
                     logger.info(
-                        f"Initializing {decoder_pretrained_model_name_or_path} as a decoder model. "
-                        f"Cross attention layers are added to {decoder_pretrained_model_name_or_path} "
-                        f"and randomly initialized if {decoder_pretrained_model_name_or_path}'s architecture allows for "
-                        "cross attention layers."
+                        f"Initializing {decoder_pretrained_model_name_or_path} as a decoder model. Cross attention"
+                        f" layers are added to {decoder_pretrained_model_name_or_path} and randomly initialized if"
+                        f" {decoder_pretrained_model_name_or_path}'s architecture allows for cross attention layers."
                     )
                     decoder_config.is_decoder = True
                     decoder_config.add_cross_attention = True

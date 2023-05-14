@@ -21,7 +21,6 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
-from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
@@ -43,7 +42,8 @@ from ...modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from ...modeling_utils import PreTrainedModel, apply_chunking_to_forward
+from ...modeling_utils import PreTrainedModel
+from ...pytorch_utils import apply_chunking_to_forward
 from ...utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -58,7 +58,6 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "google/fnet-base"
 _CONFIG_FOR_DOC = "FNetConfig"
-_TOKENIZER_FOR_DOC = "FNetTokenizer"
 
 FNET_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "google/fnet-base",
@@ -117,12 +116,9 @@ class FNetEmbeddings(nn.Module):
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
 
-        if version.parse(torch.__version__) > version.parse("1.6.0"):
-            self.register_buffer(
-                "token_type_ids",
-                torch.zeros(self.position_ids.size(), dtype=torch.long),
-                persistent=False,
-            )
+        self.register_buffer(
+            "token_type_ids", torch.zeros(self.position_ids.size(), dtype=torch.long), persistent=False
+        )
 
     def forward(self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None):
         if input_ids is not None:
@@ -181,14 +177,14 @@ class FNetBasicFourierTransform(nn.Module):
                 )
             else:
                 logging.warning(
-                    "SciPy is needed for DFT matrix calculation and is not found. Using TPU optimized fast fourier transform instead."
+                    "SciPy is needed for DFT matrix calculation and is not found. Using TPU optimized fast fourier"
+                    " transform instead."
                 )
                 self.fourier_transform = fftn
         else:
             self.fourier_transform = fftn
 
     def forward(self, hidden_states):
-
         # NOTE: We do not use torch.vmap as it is not integrated into PyTorch stable versions.
         # Interested users can modify the code to use vmap from the nightly versions, getting the vmap from here:
         # https://pytorch.org/docs/master/generated/torch.vmap.html. Note that fourier transform methods will need
@@ -481,7 +477,7 @@ FNET_INPUTS_DOCSTRING = r"""
         input_ids (`torch.LongTensor` of shape `({0})`):
             Indices of input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`FNetTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -543,20 +539,19 @@ class FNetModel(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=BaseModelOutput,
         config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
-        input_ids=None,
-        token_type_ids=None,
-        position_ids=None,
-        inputs_embeds=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
+        input_ids: Optional[torch.LongTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[tuple, BaseModelOutput]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -579,7 +574,8 @@ class FNetModel(FNetPreTrainedModel):
             and self.config.tpu_short_seq_length != seq_length
         ):
             raise ValueError(
-                "The `tpu_short_seq_length` in FNetConfig should be set equal to the sequence length being passed to the model when using TPU optimizations."
+                "The `tpu_short_seq_length` in FNetConfig should be set equal to the sequence length being passed to"
+                " the model when using TPU optimizations."
             )
 
         device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -625,6 +621,8 @@ class FNetModel(FNetPreTrainedModel):
     FNET_START_DOCSTRING,
 )
 class FNetForPreTraining(FNetPreTrainedModel):
+    _keys_to_ignore_on_load_missing = ["cls.predictions.decoder.bias", "cls.predictions.decoder.weight"]
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -672,10 +670,10 @@ class FNetForPreTraining(FNetPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import FNetTokenizer, FNetForPreTraining
+        >>> from transformers import AutoTokenizer, FNetForPreTraining
         >>> import torch
 
-        >>> tokenizer = FNetTokenizer.from_pretrained("google/fnet-base")
+        >>> tokenizer = AutoTokenizer.from_pretrained("google/fnet-base")
         >>> model = FNetForPreTraining.from_pretrained("google/fnet-base")
         >>> inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
         >>> outputs = model(**inputs)
@@ -717,6 +715,8 @@ class FNetForPreTraining(FNetPreTrainedModel):
 
 @add_start_docstrings("""FNet Model with a `language modeling` head on top.""", FNET_START_DOCSTRING)
 class FNetForMaskedLM(FNetPreTrainedModel):
+    _keys_to_ignore_on_load_missing = ["cls.predictions.decoder.bias", "cls.predictions.decoder.weight"]
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -734,7 +734,6 @@ class FNetForMaskedLM(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=MaskedLMOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -821,10 +820,10 @@ class FNetForNextSentencePrediction(FNetPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import FNetTokenizer, FNetForNextSentencePrediction
+        >>> from transformers import AutoTokenizer, FNetForNextSentencePrediction
         >>> import torch
 
-        >>> tokenizer = FNetTokenizer.from_pretrained("google/fnet-base")
+        >>> tokenizer = AutoTokenizer.from_pretrained("google/fnet-base")
         >>> model = FNetForNextSentencePrediction.from_pretrained("google/fnet-base")
         >>> prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced."
         >>> next_sentence = "The sky is blue due to the shorter wavelength of blue light."
@@ -836,7 +835,8 @@ class FNetForNextSentencePrediction(FNetPreTrainedModel):
 
         if "next_sentence_label" in kwargs:
             warnings.warn(
-                "The `next_sentence_label` argument is deprecated and will be removed in a future version, use `labels` instead.",
+                "The `next_sentence_label` argument is deprecated and will be removed in a future version, use"
+                " `labels` instead.",
                 FutureWarning,
             )
             labels = kwargs.pop("next_sentence_label")
@@ -893,7 +893,6 @@ class FNetForSequenceClassification(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=SequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -978,7 +977,6 @@ class FNetForMultipleChoice(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=MultipleChoiceModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1060,7 +1058,6 @@ class FNetForTokenClassification(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TokenClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1129,7 +1126,6 @@ class FNetForQuestionAnswering(FNetPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(FNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=QuestionAnsweringModelOutput,
         config_class=_CONFIG_FOR_DOC,

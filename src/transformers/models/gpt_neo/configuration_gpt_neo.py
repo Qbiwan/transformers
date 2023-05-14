@@ -36,7 +36,7 @@ class GPTNeoConfig(PretrainedConfig):
     This is the configuration class to store the configuration of a [`GPTNeoModel`]. It is used to instantiate a GPT
     Neo model according to the specified arguments, defining the model architecture. Instantiating a configuration with
     the defaults will yield a similar configuration to that of the GPTNeo
-    [gpt-neo-1.3B](https://huggingface.co/EleutherAI/gpt-neo-1.3B) architecture.
+    [EleutherAI/gpt-neo-1.3B](https://huggingface.co/EleutherAI/gpt-neo-1.3B) architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -66,6 +66,10 @@ class GPTNeoConfig(PretrainedConfig):
             The dropout probabilitiy for all fully connected layers in the embeddings, encoder, and pooler.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
+        classifier_dropout (`float`, *optional*, defaults to 0.1):
+            Argument used when doing token classification, used in the model [`GPTNeoForTokenClassification`].
+
+            The dropout ratio for the hidden layer.
         max_position_embeddings (`int`, *optional*, defaults to 2048):
             The maximum sequence length that this model might ever be used with. Typically set this to something large
             just in case (e.g., 512 or 1024 or 2048).
@@ -82,12 +86,12 @@ class GPTNeoConfig(PretrainedConfig):
     Example:
 
     ```python
-    >>> from transformers import GPTNeoModel, GPTNeoConfig
+    >>> from transformers import GPTNeoConfig, GPTNeoModel
 
     >>> # Initializing a GPTNeo EleutherAI/gpt-neo-1.3B style configuration
     >>> configuration = GPTNeoConfig()
 
-    >>> # Initializing a model from the EleutherAI/gpt-neo-1.3B style configuration
+    >>> # Initializing a model (with random weights) from the EleutherAI/gpt-neo-1.3B style configuration
     >>> model = GPTNeoModel(configuration)
 
     >>> # Accessing the model configuration
@@ -111,17 +115,13 @@ class GPTNeoConfig(PretrainedConfig):
         resid_dropout=0.0,
         embed_dropout=0.0,
         attention_dropout=0.0,
+        classifier_dropout=0.1,
         layer_norm_epsilon=1e-5,
         initializer_range=0.02,
-        summary_type="cls_index",
-        summary_use_proj=True,
-        summary_activation=None,
-        summary_proj_to_labels=True,
-        summary_first_dropout=0.1,
         use_cache=True,
         bos_token_id=50256,
         eos_token_id=50256,
-        **kwargs
+        **kwargs,
     ):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
@@ -134,13 +134,9 @@ class GPTNeoConfig(PretrainedConfig):
         self.resid_dropout = resid_dropout
         self.embed_dropout = embed_dropout
         self.attention_dropout = attention_dropout
+        self.classifier_dropout = classifier_dropout
         self.layer_norm_epsilon = layer_norm_epsilon
         self.initializer_range = initializer_range
-        self.summary_type = summary_type
-        self.summary_use_proj = summary_use_proj
-        self.summary_activation = summary_activation
-        self.summary_first_dropout = summary_first_dropout
-        self.summary_proj_to_labels = summary_proj_to_labels
         self.use_cache = use_cache
 
         self.bos_token_id = bos_token_id
@@ -231,9 +227,8 @@ class GPTNeoOnnxConfig(OnnxConfigWithPast):
         is_pair: bool = False,
         framework: Optional[TensorType] = None,
     ) -> Mapping[str, Any]:
-
         common_inputs = super(OnnxConfigWithPast, self).generate_dummy_inputs(
-            tokenizer, batch_size, seq_length, is_pair, framework
+            tokenizer, batch_size=batch_size, seq_length=seq_length, is_pair=is_pair, framework=framework
         )
 
         # We need to order the input in the way they appears in the forward()
@@ -261,8 +256,9 @@ class GPTNeoOnnxConfig(OnnxConfigWithPast):
 
         ordered_inputs["attention_mask"] = common_inputs["attention_mask"]
         if self.use_past:
+            mask_dtype = ordered_inputs["attention_mask"].dtype
             ordered_inputs["attention_mask"] = torch.cat(
-                [ordered_inputs["attention_mask"], torch.ones(batch, past_key_values_length)], dim=1
+                [ordered_inputs["attention_mask"], torch.ones(batch, past_key_values_length, dtype=mask_dtype)], dim=1
             )
 
         return ordered_inputs

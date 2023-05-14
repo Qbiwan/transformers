@@ -48,8 +48,8 @@ class T5Config(PretrainedConfig):
         d_model (`int`, *optional*, defaults to 512):
             Size of the encoder layers and the pooler layer.
         d_kv (`int`, *optional*, defaults to 64):
-            Size of the key, query, value projections per attention head. `d_kv` has to be equal to `d_model //
-            num_heads`.
+            Size of the key, query, value projections per attention head. The `inner_dim` of the projection layer will
+            be defined as `num_heads * d_kv`.
         d_ff (`int`, *optional*, defaults to 2048):
             Size of the intermediate feed forward layer in each `T5Block`.
         num_layers (`int`, *optional*, defaults to 6):
@@ -98,7 +98,7 @@ class T5Config(PretrainedConfig):
         use_cache=True,
         pad_token_id=0,
         eos_token_id=1,
-        **kwargs
+        **kwargs,
     ):
         self.vocab_size = vocab_size
         self.d_model = d_model
@@ -116,6 +116,22 @@ class T5Config(PretrainedConfig):
         self.initializer_factor = initializer_factor
         self.feed_forward_proj = feed_forward_proj
         self.use_cache = use_cache
+
+        act_info = self.feed_forward_proj.split("-")
+        self.dense_act_fn = act_info[-1]
+        self.is_gated_act = act_info[0] == "gated"
+
+        if len(act_info) > 1 and act_info[0] != "gated" or len(act_info) > 2:
+            raise ValueError(
+                f"`feed_forward_proj`: {feed_forward_proj} is not a valid activation function of the dense layer."
+                "Please make sure `feed_forward_proj` is of the format `gated-{ACT_FN}` or `{ACT_FN}`, e.g. "
+                "'gated-gelu' or 'relu'"
+            )
+
+        # for backwards compatibility
+        if feed_forward_proj == "gated-gelu":
+            self.dense_act_fn = "gelu_new"
+
         super().__init__(
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,

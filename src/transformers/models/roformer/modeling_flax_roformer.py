@@ -16,13 +16,13 @@
 
 from typing import Callable, Optional, Tuple
 
-import numpy as np
-
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict
+import numpy as np
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen.attention import dot_product_attention_weights
+from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
 from ...modeling_flax_outputs import (
@@ -42,7 +42,6 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "junnyu/roformer_chinese_base"
 _CONFIG_FOR_DOC = "RoFormerConfig"
-_TOKENIZER_FOR_DOC = "RoFormerTokenizer"
 
 FLAX_ROFORMER_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "junnyu/roformer_chinese_small",
@@ -94,7 +93,7 @@ ROFORMER_INPUTS_DOCSTRING = r"""
         input_ids (`numpy.ndarray` of shape `({0})`):
             Indices of input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`RoFormerTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -179,8 +178,8 @@ class FlaxRoFormerSelfAttention(nn.Module):
     def setup(self) -> None:
         if self.config.hidden_size % self.config.num_attention_heads != 0:
             raise ValueError(
-                "`config.hidden_size`: {self.config.hidden_size} has to be a multiple of `config.num_attention_heads`\
-                    : {self.config.num_attention_heads}"
+                "`config.hidden_size`: {self.config.hidden_size} has to be a multiple of `config.num_attention_heads` "
+                "                   : {self.config.num_attention_heads}"
             )
 
         self.query = nn.Dense(
@@ -239,7 +238,7 @@ class FlaxRoFormerSelfAttention(nn.Module):
             attention_bias = lax.select(
                 attention_mask > 0,
                 jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-                jnp.full(attention_mask.shape, -1e10).astype(self.dtype),
+                jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
             )
         else:
             attention_bias = None
@@ -455,8 +454,8 @@ class FlaxRoFormerLayerCollection(nn.Module):
         if head_mask is not None:
             if head_mask.shape[0] != (len(self.layers)):
                 raise ValueError(
-                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for \
-                        {head_mask.shape[0]}."
+                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for                  "
+                    f"       {head_mask.shape[0]}."
                 )
 
         for i, layer in enumerate(self.layers):
@@ -621,12 +620,13 @@ class FlaxRoFormerPreTrainedModel(FlaxPreTrainedModel):
         input_shape: Tuple = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
-        **kwargs
+        _do_init: bool = True,
+        **kwargs,
     ):
         module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype)
+        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
+    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
         # init input tensors
         input_ids = jnp.zeros(input_shape, dtype="i4")
         token_type_ids = jnp.zeros_like(input_ids)
@@ -636,9 +636,19 @@ class FlaxRoFormerPreTrainedModel(FlaxPreTrainedModel):
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
-        return self.module.init(rngs, input_ids, attention_mask, token_type_ids, head_mask, return_dict=False)[
-            "params"
-        ]
+        random_params = self.module.init(
+            rngs, input_ids, attention_mask, token_type_ids, head_mask, return_dict=False
+        )["params"]
+
+        if params is not None:
+            random_params = flatten_dict(unfreeze(random_params))
+            params = flatten_dict(unfreeze(params))
+            for missing_key in self._missing_keys:
+                params[missing_key] = random_params[missing_key]
+            self._missing_keys = set()
+            return freeze(unflatten_dict(params))
+        else:
+            return random_params
 
     @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     def __call__(
@@ -738,9 +748,7 @@ class FlaxRoFormerModel(FlaxRoFormerPreTrainedModel):
     module_class = FlaxRoFormerModule
 
 
-append_call_sample_docstring(
-    FlaxRoFormerModel, _TOKENIZER_FOR_DOC, _CHECKPOINT_FOR_DOC, FlaxBaseModelOutput, _CONFIG_FOR_DOC
-)
+append_call_sample_docstring(FlaxRoFormerModel, _CHECKPOINT_FOR_DOC, FlaxBaseModelOutput, _CONFIG_FOR_DOC)
 
 
 class FlaxRoFormerForMaskedLMModule(nn.Module):
@@ -800,7 +808,6 @@ class FlaxRoFormerForMaskedLM(FlaxRoFormerPreTrainedModel):
 
 append_call_sample_docstring(
     FlaxRoFormerForMaskedLM,
-    _TOKENIZER_FOR_DOC,
     _CHECKPOINT_FOR_DOC,
     FlaxMaskedLMOutput,
     _CONFIG_FOR_DOC,
@@ -865,7 +872,6 @@ class FlaxRoFormerForSequenceClassification(FlaxRoFormerPreTrainedModel):
 
 append_call_sample_docstring(
     FlaxRoFormerForSequenceClassification,
-    _TOKENIZER_FOR_DOC,
     _CHECKPOINT_FOR_DOC,
     FlaxSequenceClassifierOutput,
     _CONFIG_FOR_DOC,
@@ -944,7 +950,6 @@ overwrite_call_docstring(
 )
 append_call_sample_docstring(
     FlaxRoFormerForMultipleChoice,
-    _TOKENIZER_FOR_DOC,
     _CHECKPOINT_FOR_DOC,
     FlaxMultipleChoiceModelOutput,
     _CONFIG_FOR_DOC,
@@ -1010,7 +1015,6 @@ class FlaxRoFormerForTokenClassification(FlaxRoFormerPreTrainedModel):
 
 append_call_sample_docstring(
     FlaxRoFormerForTokenClassification,
-    _TOKENIZER_FOR_DOC,
     _CHECKPOINT_FOR_DOC,
     FlaxTokenClassifierOutput,
     _CONFIG_FOR_DOC,
@@ -1079,7 +1083,6 @@ class FlaxRoFormerForQuestionAnswering(FlaxRoFormerPreTrainedModel):
 
 append_call_sample_docstring(
     FlaxRoFormerForQuestionAnswering,
-    _TOKENIZER_FOR_DOC,
     _CHECKPOINT_FOR_DOC,
     FlaxQuestionAnsweringModelOutput,
     _CONFIG_FOR_DOC,

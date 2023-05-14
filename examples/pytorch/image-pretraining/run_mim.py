@@ -27,17 +27,17 @@ from torchvision.transforms import Compose, Lambda, Normalize, RandomHorizontalF
 import transformers
 from transformers import (
     CONFIG_MAPPING,
-    FEATURE_EXTRACTOR_MAPPING,
+    IMAGE_PROCESSOR_MAPPING,
     MODEL_FOR_MASKED_IMAGE_MODELING_MAPPING,
     AutoConfig,
-    AutoFeatureExtractor,
+    AutoImageProcessor,
     AutoModelForMaskedImageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version
+from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 
@@ -48,7 +48,7 @@ Any model supported by the AutoModelForMaskedImageModeling API can be used.
 logger = logging.getLogger(__name__)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.19.0.dev0")
+check_min_version("4.30.0.dev0")
 
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/image-pretraining/requirements.txt")
 
@@ -87,20 +87,24 @@ class DataTrainingArguments:
     max_train_samples: Optional[int] = field(
         default=None,
         metadata={
-            "help": "For debugging purposes or quicker training, truncate the number of training examples to this "
-            "value if set."
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of training examples to this "
+                "value if set."
+            )
         },
     )
     max_eval_samples: Optional[int] = field(
         default=None,
         metadata={
-            "help": "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
-            "value if set."
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
+                "value if set."
+            )
         },
     )
 
     def __post_init__(self):
-        data_files = dict()
+        data_files = {}
         if self.train_dir is not None:
             data_files["train"] = self.train_dir
         if self.validation_dir is not None:
@@ -111,15 +115,17 @@ class DataTrainingArguments:
 @dataclass
 class ModelArguments:
     """
-    Arguments pertaining to which model/config/feature extractor we are going to pre-train.
+    Arguments pertaining to which model/config/image processor we are going to pre-train.
     """
 
     model_name_or_path: str = field(
         default=None,
         metadata={
-            "help": "The model checkpoint for weights initialization. Can be a local path to a pytorch_model.bin or a "
-            "checkpoint identifier on the hub. "
-            "Don't set if you want to train a model from scratch."
+            "help": (
+                "The model checkpoint for weights initialization. Can be a local path to a pytorch_model.bin or a "
+                "checkpoint identifier on the hub. "
+                "Don't set if you want to train a model from scratch."
+            )
         },
     )
     model_type: Optional[str] = field(
@@ -132,8 +138,10 @@ class ModelArguments:
     config_overrides: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Override some existing default config settings when a model is trained from scratch. Example: "
-            "n_embd=10,resid_pdrop=0.2,scale_attn_weights=false,summary_type=cls_index"
+            "help": (
+                "Override some existing default config settings when a model is trained from scratch. Example: "
+                "n_embd=10,resid_pdrop=0.2,scale_attn_weights=false,summary_type=cls_index"
+            )
         },
     )
     cache_dir: Optional[str] = field(
@@ -144,24 +152,30 @@ class ModelArguments:
         default="main",
         metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
-    feature_extractor_name: str = field(default=None, metadata={"help": "Name or path of preprocessor config."})
+    image_processor_name: str = field(default=None, metadata={"help": "Name or path of preprocessor config."})
     use_auth_token: bool = field(
         default=False,
         metadata={
-            "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-            "with private models)."
+            "help": (
+                "Will use the token generated when running `huggingface-cli login` (necessary to use this script "
+                "with private models)."
+            )
         },
     )
     image_size: Optional[int] = field(
         default=None,
         metadata={
-            "help": "The size (resolution) of each image. If not specified, will use `image_size` of the configuration."
+            "help": (
+                "The size (resolution) of each image. If not specified, will use `image_size` of the configuration."
+            )
         },
     )
     patch_size: Optional[int] = field(
         default=None,
         metadata={
-            "help": "The size (resolution) of each patch. If not specified, will use `patch_size` of the configuration."
+            "help": (
+                "The size (resolution) of each patch. If not specified, will use `patch_size` of the configuration."
+            )
         },
     )
     encoder_stride: Optional[int] = field(
@@ -225,12 +239,20 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+    # information sent is the one passed as arguments along with your Python/PyTorch versions.
+    send_example_telemetry("run_mim", model_args, data_args)
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    if training_args.should_log:
+        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
+        transformers.utils.logging.set_verbosity_info()
 
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
@@ -316,17 +338,16 @@ def main():
         }
     )
 
-    # create feature extractor
-    if model_args.feature_extractor_name:
-        feature_extractor = AutoFeatureExtractor.from_pretrained(model_args.feature_extractor_name, **config_kwargs)
+    # create image processor
+    if model_args.image_processor_name:
+        image_processor = AutoImageProcessor.from_pretrained(model_args.image_processor_name, **config_kwargs)
     elif model_args.model_name_or_path:
-        feature_extractor = AutoFeatureExtractor.from_pretrained(model_args.model_name_or_path, **config_kwargs)
+        image_processor = AutoImageProcessor.from_pretrained(model_args.model_name_or_path, **config_kwargs)
     else:
-        FEATURE_EXTRACTOR_TYPES = {
-            conf.model_type: feature_extractor_class
-            for conf, feature_extractor_class in FEATURE_EXTRACTOR_MAPPING.items()
+        IMAGE_PROCESSOR_TYPES = {
+            conf.model_type: image_processor_class for conf, image_processor_class in IMAGE_PROCESSOR_MAPPING.items()
         }
-        feature_extractor = FEATURE_EXTRACTOR_TYPES[model_args.model_type]()
+        image_processor = IMAGE_PROCESSOR_TYPES[model_args.model_type]()
 
     # create model
     if model_args.model_name_or_path:
@@ -364,7 +385,7 @@ def main():
             RandomResizedCrop(model_args.image_size, scale=(0.67, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0)),
             RandomHorizontalFlip(),
             ToTensor(),
-            Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            Normalize(mean=image_processor.image_mean, std=image_processor.image_std),
         ]
     )
 
@@ -409,7 +430,7 @@ def main():
         args=training_args,
         train_dataset=ds["train"] if training_args.do_train else None,
         eval_dataset=ds["validation"] if training_args.do_eval else None,
-        tokenizer=feature_extractor,
+        tokenizer=image_processor,
         data_collator=collate_fn,
     )
 
